@@ -236,6 +236,7 @@ class yamaha(sofabase):
                 # to get the right id.
                 
                 # look for it properly
+                
                 if self.nativeObject['Basic_Status']['Input']['Input_Sel'] in self.adapter.dataset.nativeDevices['Receiver']['System']['Config']['Name']['Input']:
                     return self.dataset.nativeDevices['Receiver']['System']['Config']['Name']['Input'][self.nativeObject['Basic_Status']['Input']['Input_Sel']]
                 
@@ -260,6 +261,34 @@ class yamaha(sofabase):
             except:
                 self.log.error('!! Error during SelectInput', exc_info=True)
                 return None
+
+    class InputLockModeController(devices.ModeController):
+
+        @property            
+        def mode(self):
+            try:
+                #self.log.info('NativeObject: %s' % self.nativeObject)
+                for mode in self._supportedModes:
+                    if 'managed' in self.nativeObject and self.nativeObject["managed"]["input_lock"]==self._supportedModes[mode]:
+                        return "%s.%s" % (self.name, mode)
+            except:
+                self.log.error('!! error getting surround mode', exc_info=True)
+                return ""
+
+        async def SetMode(self, payload, correlationToken=''):
+            try:
+                if payload['mode'].split('.')[1] in self._supportedModes:
+                    newmode=self._supportedModes[payload['mode'].split('.')[1]] # Yamaha modes have spaces, so set based on display name
+                    if newmode=="Locked":
+                        locked_input=self.nativeObject['Basic_Status']['Input']['Input_Sel']
+                    else:
+                        locked_input=""
+                    x=await self.adapter.setAndUpdate(self.device, {"managed": {'input_lock':newmode, "locked_input":locked_input}}, correlationToken)
+                    return x
+                self.log.error('!! error - did not find mode %s' % payload)
+            except:
+                self.adapter.log.error('Error setting mode status %s' % payload, exc_info=True)
+            return {}
 
     class SurroundModeController(devices.ModeController):
 
@@ -358,6 +387,36 @@ class yamaha(sofabase):
             else:
                 self.loop=loop
 
+
+        async def check_lock(self):
+
+            try:
+                if self.dataset.nativeDevices['Receiver']['Main_Zone']["managed"]["input_lock"]=="Locked":
+                    if self.dataset.nativeDevices['Receiver']['Main_Zone']["managed"]["locked_input"]!=self.dataset.nativeDevices['Receiver']['System']['Config']['Name']['Input']:
+                        self.log.info('Setting input back to locked value: %s' % self.dataset.nativeDevices['Receiver']['Main_Zone']["managed"]["locked_input"])
+                        command= {"Main_Zone": {"Input": {"Input_Sel":  self.dataset.nativeDevices['Receiver']['Main_Zone']["managed"]["locked_input"].replace('_','')}}}
+                        await self.receiver.sendCommand(command)
+            except:
+                self.log.error('Error updating state of receiver InputLock: %s' % (itemState), exc_info=True)
+
+
+        async def updateInputState(self, itemState):
+
+            try:
+                result=await self.receiver.getState(itemState)
+                for item in result:
+                    if item.find('@')!=0:
+                        await self.dataset.ingest({ "Receiver": {item: result[item]} })
+            except:
+                self.log.error('Error updating state of receiver: %s' % (itemState), exc_info=True)
+
+        async def updateInputLockState(self, managed_data):
+
+            try:
+                await self.dataset.ingest({ "Receiver": {"Main_Zone": { "managed" : dict(managed_data) }}})
+            except:
+                self.log.error('Error updating state of receiver InputLock: %s' % (managed_data), exc_info=True)
+
             
         async def updateState(self, itemState):
 
@@ -375,6 +434,8 @@ class yamaha(sofabase):
                 message=message['YAMAHA_AV']
                 # Some messages might not be power or volume, but this works for now
                 await self.updateState('basic_status')
+                await self.check_lock()
+
             except:
                 self.log.error('Error processing UPNP: %s' % message, exc_info=True)
 
@@ -409,6 +470,7 @@ class yamaha(sofabase):
                 self.port=self.dataset.config['port']
                 self.receiver=yamahaXML(log=self.log, dataset=self.dataset)
                 await self.updateEverything()
+                await self.updateInputLockState({"input_lock": "Unlocked", "locked_input": ""})
                 self.inputlist=[]
             except:
                 self.log.error('error with update',exc_info=True)
@@ -478,6 +540,8 @@ class yamaha(sofabase):
                     device.EndpointHealth=yamaha.EndpointHealth(device=device)
                     device.SurroundModeController=yamaha.SurroundModeController('Surround', device=device, 
                             supportedModes={'7chStereo': '7ch Stereo', "SurroundDecoder": 'Surround Decoder'})
+                    device.InputLockModeController=yamaha.InputLockModeController('InputLock', device=device, 
+                            supportedModes={'Unlocked': 'Unlocked', "Locked": "Locked"})
 
                     #device.SurroundController=yamaha.SurroundController(device=device, inputs=self.getSurroundList())
                     device.SpeakerController=yamaha.SpeakerController(device=device)
@@ -497,10 +561,14 @@ class yamaha(sofabase):
             #  and then call this to apply the change
             
             try:
-                self.log.info('.. using new update methods: %s (%s)' % (command, device))
-                response=await self.receiver.sendCommand(command)
-                self.log.info('<- %s' % response)
+                if 'managed' in command:
+                    if 'input_lock' in command['managed']:
+                        await self.updateInputLockState(command['managed'])
+                else:
+                    response=await self.receiver.sendCommand(command)
+                    self.log.info('<- %s' % response)
                 await self.updateEverything()
+                    
                 return await self.dataset.generateResponse(device.endpointId, correlationToken)
             except:
                 self.log.error('!! Error during Set and Update: %s %s / %s %s' % (deviceid, command, controllerprop, controllervalue), exc_info=True)
