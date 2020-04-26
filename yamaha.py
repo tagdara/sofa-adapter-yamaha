@@ -272,7 +272,7 @@ class yamaha(sofabase):
                     if 'managed' in self.nativeObject and self.nativeObject["managed"]["input_lock"]==self._supportedModes[mode]:
                         return "%s.%s" % (self.name, mode)
             except:
-                self.log.error('!! error getting surround mode', exc_info=True)
+                self.log.error('!! error getting input lock mode', exc_info=True)
                 return ""
 
         async def SetMode(self, payload, correlationToken=''):
@@ -295,6 +295,8 @@ class yamaha(sofabase):
         @property            
         def mode(self):
             try:
+                if self.nativeObject['Basic_Status']['Surround']['Program_Sel']['Current']['Straight']=="On":
+                    return "%s.Straight" % self.name
                 for mode in self._supportedModes:
                     if self.nativeObject['Basic_Status']['Surround']['Program_Sel']['Current']['Sound_Program']==self._supportedModes[mode]:
                         return "%s.%s" % (self.name, mode)
@@ -306,7 +308,11 @@ class yamaha(sofabase):
             try:
                 if payload['mode'].split('.')[1] in self._supportedModes:
                     newmode=self._supportedModes[payload['mode'].split('.')[1]] # Yamaha modes have spaces, so set based on display name
-                    return await self.adapter.setAndUpdate(self.device, {"Main_Zone": {"Surround": {"Program_Sel": { "Current": {"Sound_Program": newmode }}}}}, correlationToken)
+                    if newmode=="Straight":
+                        return await self.adapter.setAndUpdate(self.device, {"Main_Zone": {"Surround": {"Program_Sel": { "Current": {"Straight": "On" }}}}}, correlationToken)
+                    else:
+                        await self.adapter.setAndUpdate(self.device, {"Main_Zone": {"Surround": {"Program_Sel": { "Current": {"Straight": "Off" }}}}}, correlationToken, update=False)
+                        return await self.adapter.setAndUpdate(self.device, {"Main_Zone": {"Surround": {"Program_Sel": { "Current": {"Sound_Program": newmode }}}}}, correlationToken)
                 self.log.error('!! error - did not find mode %s' % payload)
             except:
                 self.adapter.log.error('Error setting mode status %s' % payload, exc_info=True)
@@ -527,6 +533,7 @@ class yamaha(sofabase):
             except:
                 self.log.error('Error getting input list', exc_info=True)
                 return []
+
             
 
         def addSmartSpeaker(self, deviceid, name="Receiver"):
@@ -538,8 +545,10 @@ class yamaha(sofabase):
                     device.InputController=yamaha.InputController(device=device, inputs=self.getInputList())
                     device.PowerController=yamaha.PowerController(device=device)
                     device.EndpointHealth=yamaha.EndpointHealth(device=device)
-                    device.SurroundModeController=yamaha.SurroundModeController('Surround', device=device, 
-                            supportedModes={'7chStereo': '7ch Stereo', "SurroundDecoder": 'Surround Decoder'})
+                    modes={}
+                    for mode in self.dataset.config['surrounds']:
+                        modes[mode.replace(" ", "")]=mode
+                    device.SurroundModeController=yamaha.SurroundModeController('Surround', device=device, supportedModes=modes)
                     device.InputLockModeController=yamaha.InputLockModeController('InputLock', device=device, 
                             supportedModes={'Unlocked': 'Unlocked', "Locked": "Locked"})
 
@@ -555,7 +564,7 @@ class yamaha(sofabase):
             except:
                 return False
 
-        async def setAndUpdate(self, device, command, correlationToken=''):
+        async def setAndUpdate(self, device, command, correlationToken='', update=True):
             
             #  General Set and Update process for insteon. Most direct commands should just set the native command parameters
             #  and then call this to apply the change
@@ -567,12 +576,12 @@ class yamaha(sofabase):
                 else:
                     response=await self.receiver.sendCommand(command)
                     self.log.info('<- %s' % response)
-                await self.updateEverything()
-                    
-                return await self.dataset.generateResponse(device.endpointId, correlationToken)
+                if update:
+                    await self.updateEverything()
+                    return await self.dataset.generateResponse(device.endpointId, correlationToken)
             except:
                 self.log.error('!! Error during Set and Update: %s %s / %s %s' % (deviceid, command, controllerprop, controllervalue), exc_info=True)
-                return None
+            return None
                 
         async def virtualList(self, itempath, query={}):
 
