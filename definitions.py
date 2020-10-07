@@ -27,7 +27,11 @@ class yamahaDefinitions():
 
     }
 
-    allsurroundmodes=[
+    # This data does not seem to be available for retrieval from the device, but it is documented in the API with the following options
+    # which may or may not be present on any given device.
+    # Configure which ones are visible in the config file.
+
+    surroundmodes=[
                 "Hall in Munich", 
                 "Hall in Vienna", 
                 "Hall in Amsterdam", 

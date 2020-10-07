@@ -5,12 +5,10 @@ import sys, os
 sys.path.append(os.path.dirname(__file__))
 sys.path.append(os.path.join(os.path.dirname(__file__),'../../base'))
 
-from sofabase import sofabase
-from sofabase import adapterbase
+from sofabase import sofabase, adapterbase, configbase
 import devices
 
-
-
+import concurrent.futures
 import math
 import random
 from collections import namedtuple
@@ -55,7 +53,7 @@ class BroadcastProtocol:
                     event=self.etree_to_dict(et.fromstring(data[data.find("<?xml"):]))
                     self.log.info('-> ssdp %s' % event)
                     self.processUPNPevent(event)
-                    #return str(data)
+                    return event
         except:
             self.log.error('Error during datagram_received')
 
@@ -96,108 +94,24 @@ class BroadcastProtocol:
 
         try:
             #self.log.info('Event: %s' % event)
-            asyncio.ensure_future(self.returnMessage(event))
+            asyncio.create_task(self.returnMessage(event))
 
         except:
             self.log.info("Error processing UPNP Event: %s " % upnpxml,exc_info=True)
 
 
-class yamahaXML():
-
-    def __init__(self, log=None, dataset=None):
-        self.log=log
-        self.dataset=dataset
-        self.definitions=definitions.yamahaDefinitions
-
-    def etree_to_dict(self, t):
-        
-        d = {t.tag: {} if t.attrib else None}
-        children = list(t)
-        if children:
-            dd = defaultdict(list)
-            for dc in map(self.etree_to_dict, children):
-                for k, v in dc.items():
-                    dd[k].append(v)
-            d = {t.tag: {k: v[0] if len(v) == 1 else v for k, v in dd.items()}}
-        if t.attrib:
-            d[t.tag].update(('@' + k, v) for k, v in t.attrib.items())
-        if t.text:
-            text = t.text.strip()
-            if children or t.attrib:
-                if text:
-                    d[t.tag]['#text'] = text
-            else:
-                d[t.tag] = text
-        return d
-
-
-    def data2xml(self, d, name='YAMAHA_AV'):
-        r = et.Element(name)
-        r.set('cmd','PUT')
-        return et.tostring(self.buildxml(r, d))
-
-    def buildxml(self, r, d):
-        if isinstance(d, dict):
-            for k, v in d.items():
-                s = et.SubElement(r, k)
-                self.buildxml(s, v)
-        elif isinstance(d, tuple) or isinstance(d, list):
-            for v in d:
-                s = et.SubElement(r, 'i')
-                self.buildxml(s, v)
-        elif isinstance(d, str):
-            r.text = d
-        else:
-            r.text = str(d)
-        return r
-
-        
-    async def sendCommand(self, command_data):
-        try:
-            data=self.data2xml(command_data).decode()
-            socket.setdefaulttimeout(1)
-
-            url = 'http://%s:%s/YamahaRemoteControl/ctrl' % (self.dataset.config['address'], self.dataset.config['port'])
-            #self.log.info('Command: %s %s' % (url, data))
-            headers = { "Content-type": "text/xml" }
-            self.log.info('Sending: %s %s %s' % (url, data, headers))
-            async with aiohttp.ClientSession() as client:
-                response=await client.post(url, data=data, headers=headers)
-                xml=await response.read()
-                self.log.debug('XML resp: %s' % xml)
-                if xml:
-                    ydata=self.etree_to_dict(et.fromstring(xml))
-                    return ydata['YAMAHA_AV']
-                else:
-                    return {}
-        except:
-            self.log.error("send_command error",exc_info=True)
-    
-    async def getState(self, itemState):
-        try:
-            url = 'http://%s:%s/YamahaRemoteControl/ctrl' % (self.dataset.config['address'], self.dataset.config['port'])
-            headers = { "Content-type": "text/xml" }
-            data=self.definitions.itemStates[itemState]
-            async with aiohttp.ClientSession() as client:
-                response=await client.post(url, data=data, headers=headers)
-                xml=await response.read()
-                if xml:
-                    ydata=self.etree_to_dict(et.fromstring(xml))
-                    return ydata['YAMAHA_AV']
-                else:
-                    return {}
-
-        except:
-            self.log.error('Error sending command', exc_info=True)
-    
-    async def main(self):
-        async with aiohttp.ClientSession() as client:
-            html = await self.authenticate(client)
-            return html
-
-
 class yamaha(sofabase):
 
+    class adapter_config(configbase):
+    
+        def adapter_fields(self):
+            self.receiver_address=self.set_or_default('receiver_address', mandatory=True)
+            self.receiver_port=self.set_or_default('receiver_port', mandatory=True)
+            self.inputs=self.set_or_default('inputs', default=["Sonos","TV"])
+            self.surrounds=self.set_or_default('surrounds', default=["7ch Stereo","Surround Decoder","Straight"])
+            self.ssdpkeywords=self.set_or_default("ssdpkeywords", default=["NT: urn:schemas-yamaha-com:service:X_YamahaRemoteControl"])
+            
+            
     class EndpointHealth(devices.EndpointHealth):
 
         @property            
@@ -378,20 +292,99 @@ class yamaha(sofabase):
                 return None
 
 
-    class adapterProcess():
+    class adapterProcess(adapterbase):
 
-
-        def __init__(self, log=None, dataset=None, notify=None, request=None, loop=None, **kwargs):
-
-            self.definitions=definitions.yamahaDefinitions
-            self.dataset=dataset
-            self.ssdpkeywords=self.dataset.config['ssdpkeywords']
-            self.log=log
-            self.notify=notify
-            if not loop:
-                self.loop = asyncio.new_event_loop()
+        def etree_to_dict(self, t):
+            
+            d = {t.tag: {} if t.attrib else None}
+            children = list(t)
+            if children:
+                dd = defaultdict(list)
+                for dc in map(self.etree_to_dict, children):
+                    for k, v in dc.items():
+                        dd[k].append(v)
+                d = {t.tag: {k: v[0] if len(v) == 1 else v for k, v in dd.items()}}
+            if t.attrib:
+                d[t.tag].update(('@' + k, v) for k, v in t.attrib.items())
+            if t.text:
+                text = t.text.strip()
+                if children or t.attrib:
+                    if text:
+                        d[t.tag]['#text'] = text
+                else:
+                    d[t.tag] = text
+            return d
+    
+    
+        def data2xml(self, d, name='YAMAHA_AV'):
+            r = et.Element(name)
+            r.set('cmd','PUT')
+            return et.tostring(self.buildxml(r, d))
+            
+    
+        def buildxml(self, r, d):
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    s = et.SubElement(r, k)
+                    self.buildxml(s, v)
+            elif isinstance(d, tuple) or isinstance(d, list):
+                for v in d:
+                    s = et.SubElement(r, 'i')
+                    self.buildxml(s, v)
+            elif isinstance(d, str):
+                r.text = d
             else:
-                self.loop=loop
+                r.text = str(d)
+            return r
+            
+
+        async def post_to_yamaha(self, data, path="YamahaRemoteControl/ctrl"):
+            try:
+                url = 'http://%s:%s/%s' % (self.config.receiver_address, self.config.receiver_port, path)
+                total_timeout = aiohttp.ClientTimeout(total=2)
+                headers = { "Content-type": "text/xml" }
+                async with aiohttp.ClientSession(timeout=total_timeout) as client:            
+                    response=await client.post(url, data=data, headers=headers)
+                    xml=await response.read()
+                    if xml:
+                        data=self.etree_to_dict(et.fromstring(xml))
+                        return data
+                        
+            except concurrent.futures._base.CancelledError:
+                self.log.error(">! Error sending to receiver (cancelled) %s" % data)
+            except aiohttp.client_exceptions.ClientConnectorError:
+                self.log.warn(">! Error sending to receiver (Client Connector Error) %s" % data)
+            except concurrent.futures._base.TimeoutError:
+                self.log.warn(">! Error sending to receiver (Timeout): %s" % data)
+            except:
+                self.log.warn(">! Error sending to receiver %s" % data, exc_info=True)
+                
+            return {}
+            
+            
+        async def sendCommand(self, command_data):
+            try:
+                data=self.data2xml(command_data).decode()
+                response=await self.post_to_yamaha(data)
+                if 'YAMAHA_AV' in response:
+                    return response['YAMAHA_AV']
+                    
+                return {}
+            except:
+                self.log.error(".. send_command error %s" % command_data, exc_info=True)
+     
+        
+        async def getState(self, itemState):
+            try:
+                data=self.definitions.itemStates[itemState]
+                response=await self.post_to_yamaha(data)
+                if 'YAMAHA_AV' in response:
+                    return response['YAMAHA_AV']
+                return {}
+    
+            except:
+                self.log.error('.. error getting state from receiver: %s' % itemState, exc_info=True)
+            return {}    
 
 
         async def check_lock(self):
@@ -401,20 +394,10 @@ class yamaha(sofabase):
                     if self.dataset.nativeDevices['Receiver']['Main_Zone']["managed"]["locked_input"]!=self.dataset.nativeDevices['Receiver']['System']['Config']['Name']['Input']:
                         self.log.info('Setting input back to locked value: %s' % self.dataset.nativeDevices['Receiver']['Main_Zone']["managed"]["locked_input"])
                         command= {"Main_Zone": {"Input": {"Input_Sel":  self.dataset.nativeDevices['Receiver']['Main_Zone']["managed"]["locked_input"].replace('_','')}}}
-                        await self.receiver.sendCommand(command)
+                        await self.sendCommand(command)
             except:
                 self.log.error('Error updating state of receiver InputLock: %s' % (itemState), exc_info=True)
 
-
-        async def updateInputState(self, itemState):
-
-            try:
-                result=await self.receiver.getState(itemState)
-                for item in result:
-                    if item.find('@')!=0:
-                        await self.dataset.ingest({ "Receiver": {item: result[item]} })
-            except:
-                self.log.error('Error updating state of receiver: %s' % (itemState), exc_info=True)
 
         async def updateInputLockState(self, managed_data):
 
@@ -427,7 +410,7 @@ class yamaha(sofabase):
         async def updateState(self, itemState):
 
             try:
-                result=await self.receiver.getState(itemState)
+                result=await self.getState(itemState)
                 for item in result:
                     if item.find('@')!=0:
                         await self.dataset.ingest({ "Receiver": {item: result[item]} })
@@ -469,12 +452,13 @@ class yamaha(sofabase):
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)    
             return sock            
             
-        async def start(self):
+        async def pre_activate(self):
 
             try:
-                self.address=self.dataset.config['address']
-                self.port=self.dataset.config['port']
-                self.receiver=yamahaXML(log=self.log, dataset=self.dataset)
+                self.definitions=definitions.yamahaDefinitions
+                self.ssdpkeywords=self.config.ssdpkeywords
+
+
                 await self.updateEverything()
                 await self.updateInputLockState({"input_lock": "Unlocked", "locked_input": ""})
                 self.inputlist=[]
@@ -489,15 +473,8 @@ class yamaha(sofabase):
                 self.log.error('error with ssdp',exc_info=True)
 
 
-        async def addSmartDevice(self, path):
-            
-            try:
-                if path.split("/")[2]=="Main_Zone":
-                    return self.addSmartSpeaker(path.split("/")[2], "Receiver")
-
-            except:
-                self.log.error('Error defining smart device', exc_info=True)
-                return False
+        async def start(self):
+            pass
 
 
         def getInputList(self):
@@ -506,7 +483,7 @@ class yamaha(sofabase):
                 inputlist=[]
                 rawinp=self.dataset.nativeDevices['Receiver']['System']['Config']['Name']['Input']
                 for inp in rawinp:
-                    if rawinp[inp] in self.dataset.config['inputs']:
+                    if rawinp[inp] in self.config.inputs:
                         inputlist.append(self.dataset.nativeDevices['Receiver']['System']['Config']['Name']['Input'][inp])
                 return inputlist
             except:
@@ -515,46 +492,48 @@ class yamaha(sofabase):
                     
         def getSurroundList(self):
             
-            # This data does not seem to be available for retrieval from the device, but it is documented in the API with the following options
-            # which may or may not be present on any given device.
-            # Configure which ones are visible in the config file.
-            
-            surroundmodes=["Hall in Munich", "Hall in Vienna", "Hall in Amsterdam", "Church in Freiburg", "Church in Royaumont", "Chamber", 
-                            "Village Vanguard", "Warehouse Loft","Cellar Club","The Roxy Theatre","The Bottom Line","Sports","Action Game", 
-                            "Roleplaying Game", "Music Video", "Recital/Opera", "Standard","Spectacle","Sci-Fi","Adventure","Drama","Mono Movie",
-                            "2ch Stereo","7ch Stereo","9ch Stereo","Straight Enhancer","7ch Enhancer","Surround Decoder"]
-            
             try:
                 surroundlist=[]
-                for surround in surroundmodes:
-                    if 'surrounds' not in self.dataset.config or surround in self.dataset.config['surrounds']:
+                for surround in self.definitions.surroundmodes:
+                    if 'surrounds' not in self.dataset.config or surround in self.config.surrounds:
                         surroundlist.append(surround)
                 return surroundlist
             except:
                 self.log.error('Error getting input list', exc_info=True)
                 return []
-
+                
             
+        async def addSmartDevice(self, path):
+            try:
+                device_id=path.split("/")[2]
+                device_type=path.split("/")[1]
+                endpointId="%s:%s:%s" % ("yamaha", device_type, device_id)
+                if endpointId not in self.dataset.localDevices:  # localDevices/friendlyNam   
+                    if device_id=="Main_Zone":
+                        nativeObject=self.dataset.nativeDevices['Receiver'][device_id]
+                        return self.addSmartSpeaker(device_id, "Receiver", nativeObject)
+            except:
+                self.log.error('Error defining smart device', exc_info=True)
+            return False
 
-        def addSmartSpeaker(self, deviceid, name="Receiver"):
+        
+        def addSmartSpeaker(self, deviceid, name="Receiver", nativeObject=None):
             
-            nativeObject=self.dataset.nativeDevices['Receiver'][deviceid]
-            if name not in self.dataset.devices:
-                if "Input" in nativeObject:
-                    device=devices.alexaDevice('yamaha/Receiver/%s' % deviceid, name, displayCategories=["RECEIVER"], adapter=self)
-                    device.InputController=yamaha.InputController(device=device, inputs=self.getInputList())
-                    device.PowerController=yamaha.PowerController(device=device)
-                    device.EndpointHealth=yamaha.EndpointHealth(device=device)
-                    modes={}
-                    for mode in self.dataset.config['surrounds']:
-                        modes[mode.replace(" ", "")]=mode
-                    device.SurroundModeController=yamaha.SurroundModeController('Surround', device=device, supportedModes=modes)
-                    device.InputLockModeController=yamaha.InputLockModeController('InputLock', device=device, 
-                            supportedModes={'Unlocked': 'Unlocked', "Locked": "Locked"})
+            if "Input" in nativeObject:
+                device=devices.alexaDevice('yamaha/Receiver/%s' % deviceid, name, displayCategories=["RECEIVER"], adapter=self)
+                device.InputController=yamaha.InputController(device=device, inputs=self.getInputList())
+                device.PowerController=yamaha.PowerController(device=device)
+                device.EndpointHealth=yamaha.EndpointHealth(device=device)
+                modes={}
+                for mode in self.config.surrounds:
+                    modes[mode.replace(" ", "")]=mode
+                device.SurroundModeController=yamaha.SurroundModeController('Surround', device=device, supportedModes=modes)
+                device.InputLockModeController=yamaha.InputLockModeController('InputLock', device=device, 
+                        supportedModes={'Unlocked': 'Unlocked', "Locked": "Locked"})
 
-                    #device.SurroundController=yamaha.SurroundController(device=device, inputs=self.getSurroundList())
-                    device.SpeakerController=yamaha.SpeakerController(device=device)
-                    return self.dataset.newaddDevice(device)
+                #device.SurroundController=yamaha.SurroundController(device=device, inputs=self.getSurroundList())
+                device.SpeakerController=yamaha.SpeakerController(device=device)
+                return self.dataset.add_device(device)
             return False
 
         def getNativeFromEndpointId(self, endpointId):
@@ -574,7 +553,7 @@ class yamaha(sofabase):
                     if 'input_lock' in command['managed']:
                         await self.updateInputLockState(command['managed'])
                 else:
-                    response=await self.receiver.sendCommand(command)
+                    response=await self.sendCommand(command)
                     self.log.info('<- %s' % response)
                 if update:
                     await self.updateEverything()
